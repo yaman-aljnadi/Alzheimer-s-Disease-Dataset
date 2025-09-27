@@ -1,0 +1,12 @@
+"Variable","Outliers"
+"number_outpatient",3288
+"number_emergency",2297
+"admission_source_id",0
+"admission_type_id",0
+"discharge_disposition_id",0
+"num_lab_procedures",0
+"num_medications",0
+"num_procedures",0
+"number_diagnoses",0
+"number_inpatient",0
+"time_in_hospital",0
