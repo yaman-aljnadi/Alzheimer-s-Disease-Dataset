@@ -1,0 +1,12 @@
+"Variable","Skewness"
+"number_emergency",29.7055984569864
+"number_outpatient",8.89268059140094
+"number_inpatient",3.6990016525358
+"discharge_disposition_id",2.52317062864077
+"admission_type_id",1.60312067851608
+"num_medications",1.32112383145848
+"num_procedures",1.31443870284752
+"time_in_hospital",1.12378294262261
+"admission_source_id",1.02925868581796
+"number_diagnoses",-0.898003601364845
+"num_lab_procedures",-0.232853542374191

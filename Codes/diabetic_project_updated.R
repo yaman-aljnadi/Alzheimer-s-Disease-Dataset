@@ -1,13 +1,14 @@
-#install.packages("fastDummies")
+#install.packages("RANN")
 # Load libraries
 library(dplyr)
 library(ggplot2)
 library(DataExplorer)
-
+library(caret)
+library(reshape2)
 
 
 # Load data
-data <- read.csv("diabetic_data_project.csv")
+data <- read.csv("../Datasets/diabetic_data_project.csv")
 
 # ------------------------
 # Data Exploration
@@ -300,3 +301,179 @@ ggplot(data_long, aes(x = variable, y = value)) +
   labs(title = "Boxplots of All 46 Predictors After Spatial Sign Transformation",
        x = "Predictors",
        y = "Values")
+
+
+
+
+
+set.seed(123)
+
+response_var <- "readmitted"
+
+pred_data <- dplyr::select(data, -all_of(response_var))
+
+# 1) Drop columns that can't form contrasts: <2 distinct non-NA values
+is_usable <- vapply(pred_data, function(x) dplyr::n_distinct(x[!is.na(x)]) >= 2, logical(1))
+pred_data <- pred_data[, is_usable, drop = FALSE]
+
+if (ncol(pred_data) < 2) {
+  stop("After removing single-level/constant columns, fewer than 2 predictors remain. Check your data.")
+}
+
+# 2) One-hot encode (numeric stay numeric; character/factor become dummies)
+dv <- dummyVars(~ ., data = pred_data, sep = "_", fullRank = TRUE)
+X  <- as.data.frame(predict(dv, newdata = pred_data))   # <-- no contrasts error now
+
+# 3) Remove near-zero-variance columns (faster, clearer heatmap)
+nzv <- nearZeroVar(X)
+if (length(nzv)) X <- X[, -nzv, drop = FALSE]
+
+# 4) kNN impute
+if (anyNA(X)) {
+  pp <- preProcess(X, method = "knnImpute", k = 5)
+  X  <- predict(pp, X)
+}
+
+# 5) Correlation matrix
+cor_mat <- cor(X, use = "pairwise.complete.obs")
+
+# 6) Keep variables that show some signal (absolute correlation > 0.2 with anything else)
+abs_max <- apply(abs(cor_mat), 1, function(r) {
+  r <- r[is.finite(r) & !is.na(r)]
+  if (!length(r)) 0 else max(r[r < 0.999], na.rm = TRUE)
+})
+keep <- abs_max >= 0.2
+if (sum(keep) >= 2) cor_mat <- cor_mat[keep, keep, drop = FALSE]
+
+# 7) Order by clustering for structure
+d   <- as.dist(1 - abs(cor_mat))
+hc  <- hclust(d, method = "average")
+ord <- hc$order
+cor_ord <- cor_mat[ord, ord, drop = FALSE]
+
+# 8) Plot (upper triangle, fast raster, no text labels = smooth in RStudio)
+cor_plot <- cor_ord
+#cor_plot[lower.tri(cor_plot, diag = TRUE)] <- NA
+cor_long <- melt(cor_plot, varnames = c("Var1", "Var2"), value.name = "Correlation")
+
+ggplot(cor_long, aes(Var1, Var2, fill = Correlation)) +
+  geom_raster(na.rm = TRUE) +
+  scale_fill_gradient2(limits = c(-1, 1), midpoint = 0, low = "blue", mid = "white", high = "red") +
+  coord_fixed() +
+  labs(title = "Correlation Heatmap (after one-hot encoding)", x = NULL, y = NULL, fill = "r") +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1, color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.grid = element_blank()
+  )
+
+
+
+
+
+set.seed(42)
+data$readmitted <- as.factor(data$readmitted)  # ensure factor for stratification
+split_idx <- caret::createDataPartition(data$readmitted, p = 0.80, list = FALSE)
+train_raw <- data[split_idx, , drop = FALSE]
+test_raw  <- data[-split_idx, , drop = FALSE]
+
+
+continuous_vars <- c(
+  "num_lab_procedures", "num_medications", "num_procedures",
+  "time_in_hospital", "number_diagnoses",
+  "number_emergency", "number_outpatient", "number_inpatient"
+)
+continuous_vars <- intersect(continuous_vars, names(train_raw))
+
+
+
+response_var <- "readmitted"
+
+# predictors only
+pred_train <- dplyr::select(train_raw, -all_of(response_var))
+pred_test  <- dplyr::select(test_raw,  -all_of(response_var))
+
+# --- NEW: drop columns in TRAIN that can't form contrasts -----------
+is_usable <- vapply(
+  pred_train,
+  function(x) {
+    xn <- x[!is.na(x)]
+    length(unique(xn)) >= 2           # at least 2 distinct non-NA values
+  },
+  logical(1)
+)
+
+if (!all(is_usable)) {
+  dropped <- names(is_usable)[!is_usable]
+  message("Dropping single-level/all-NA columns from training: ",
+          paste(dropped, collapse = ", "))
+}
+
+pred_train <- pred_train[, is_usable, drop = FALSE]
+pred_test  <- pred_test[, intersect(names(pred_test), names(pred_train)), drop = FALSE]
+
+# dummyVars: characters/factors -> dummies; numeric stay numeric
+dv <- caret::dummyVars(~ ., data = pred_train, fullRank = TRUE)
+
+X_train <- as.data.frame(predict(dv, newdata = pred_train))
+X_test  <- as.data.frame(predict(dv, newdata = pred_test))
+
+# Align columns (handle any levels missing in test)
+missing_in_test <- setdiff(colnames(X_train), colnames(X_test))
+if (length(missing_in_test)) {
+  X_test[missing_in_test] <- 0
+}
+# Remove any extra columns that appeared only in test (shouldn’t happen, but safe)
+extra_in_test <- setdiff(colnames(X_test), colnames(X_train))
+if (length(extra_in_test)) {
+  X_test <- X_test[, setdiff(colnames(X_test), extra_in_test), drop = FALSE]
+}
+# Same column order
+X_train <- X_train[, colnames(X_test), drop = FALSE]
+
+
+cols_for_yj <- intersect(colnames(X_train), continuous_vars)
+
+
+pp_knn <- caret::preProcess(X_train, method = "knnImpute", k = 5)
+Xtr_imp <- predict(pp_knn, X_train)
+Xte_imp <- predict(pp_knn, X_test)
+
+
+
+if (length(cols_for_yj)) {
+  pp_yj <- caret::preProcess(Xtr_imp[, cols_for_yj, drop = FALSE], method = "YeoJohnson")
+  Xtr_imp[, cols_for_yj] <- predict(pp_yj, Xtr_imp[, cols_for_yj, drop = FALSE])
+  Xte_imp[, cols_for_yj] <- predict(pp_yj, Xte_imp[, cols_for_yj, drop = FALSE])
+}
+
+
+
+pp_cs <- caret::preProcess(Xtr_imp, method = c("center", "scale"))
+Xtr_final <- predict(pp_cs, Xtr_imp)
+Xte_final <- predict(pp_cs, Xte_imp)
+
+
+
+
+
+if (requireNamespace("e1071", quietly = TRUE)) {
+  library(e1071)
+  # BEFORE (use original train_raw)
+  before_vals <- lapply(continuous_vars, function(v) train_raw[[v]])
+  names(before_vals) <- continuous_vars
+  skew_before <- sapply(before_vals, function(x) e1071::skewness(x, na.rm = TRUE))
+  
+  # AFTER (use processed train features)
+  after_vals <- Xtr_final[, cols_for_yj, drop = FALSE]
+  skew_after <- sapply(after_vals, function(x) e1071::skewness(x, na.rm = TRUE))
+  
+  skew_table <- data.frame(
+    Variable = names(skew_before),
+    Skew_Before = as.numeric(skew_before[names(skew_before)]),
+    Skew_After  = as.numeric(skew_after[names(skew_before)])
+  )
+  skew_table <- skew_table[order(-abs(skew_table$Skew_Before)), ]
+  print(skew_table)
+}
