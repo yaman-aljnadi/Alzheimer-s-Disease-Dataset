@@ -79,7 +79,7 @@ cor_drop <- function(X, cutoff = 0.90) {
 cor_heatmap <- function(X, fname="03_corr_heatmap.png") {
   if (ncol(X) < 2) return(invisible(NULL))
   C <- suppressWarnings(cor(X, use="pairwise.complete.obs"))
-  C[upper.tri(C, diag=TRUE)] <- NA
+  # C[upper.tri(C, diag=TRUE)] <- NA
   d <- reshape2::melt(C, na.rm = TRUE, varnames=c("Var1","Var2"), value.name="r")
   p <- ggplot(d, aes(Var1, Var2, fill = r)) +
     geom_raster() +
@@ -160,10 +160,10 @@ outlier_plot <- function(df_before, df_after, fname = "10_outliers_before_after.
     scale_fill_manual(values = c("Before" = "#FF6347", "After" = "#4682B4")) +
     labs(
       title = "Outlier Comparison Before and After Transformation",
-      subtitle = "Boxplots per variable. 'After' is Box-Cox transformed, centered, and scaled. Note free y-axes.",
+      subtitle = "Boxplots per variable. 'After' is Box-Cox transformed, centered, and scaled.",
       x = NULL, y = "Value (Variable-specific Scale)"
     ) +
-    theme_minimal(base_size = 10) +
+    theme_minimal(base_size = 15) +
     theme(strip.text = element_text(size = 8))
   
   print(p)
@@ -171,16 +171,13 @@ outlier_plot <- function(df_before, df_after, fname = "10_outliers_before_after.
   invisible(p)
 }
 
-# --- NEW FUNCTION: Individual Skewness Histograms ---
 skewness_hist_plots <- function(df_before, df_after, fname = "11_skewness_histograms.png") {
-  # Keep only original numeric columns that survived processing
   kept_cols <- intersect(colnames(df_before), colnames(df_after))
   if (length(kept_cols) == 0) return(invisible(NULL))
   
   df_before <- df_before[, kept_cols, drop = FALSE]
   df_after <- df_after[, kept_cols, drop = FALSE]
   
-  # Reshape data for plotting
   long_before <- df_before %>%
     tidyr::pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value") %>%
     mutate(State = "Before")
@@ -190,32 +187,95 @@ skewness_hist_plots <- function(df_before, df_after, fname = "11_skewness_histog
     tidyr::pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value") %>%
     mutate(State = "After")
   
-  # Combine and set factor order
   combined <- bind_rows(long_before, long_after) %>%
     mutate(State = factor(State, levels = c("Before", "After")))
   
-  # Create the faceted histogram plot
-  p <- ggplot(combined, aes(x = Value, fill = State)) +
-    geom_histogram(bins = 30, show.legend = FALSE) +
-    facet_grid(Variable ~ State, scales = "free") +
+  max_facets <- 6
+  var_chunks <- split(kept_cols, ceiling(seq_along(kept_cols) / max_facets))
+  
+  for (i in seq_along(var_chunks)) {
+    chunk_vars <- var_chunks[[i]]
+    plot_data <- filter(combined, Variable %in% chunk_vars)
+    
+    p <- ggplot(plot_data, aes(x = Value, fill = State)) +
+      geom_histogram(bins = 30, show.legend = FALSE) +
+      facet_grid(Variable ~ State, scales = "free") +
+      scale_fill_manual(values = c("Before" = "#FF6347", "After" = "#4682B4")) +
+      labs(
+        title = paste("Distribution of Numeric Predictors (Part", i, ")"),
+        subtitle = "before vs. after.",
+        x = "Value (Scales are independent for each plot)",
+        y = "Frequency"
+      ) +
+      theme_minimal(base_size = 20) +
+      theme(strip.text.y = element_text(angle = 0, hjust = 1))
+    
+    if (length(var_chunks) > 1) {
+      part_fname <- stringr::str_replace(fname, "\\.png$", paste0("_part", i, ".png"))
+    } else {
+      part_fname <- fname
+    }
+    
+    print(p)
+    gsave(part_fname, p, width = 8, height = max(8, 1.5 * length(chunk_vars)), dpi = 150)
+  }
+  invisible(NULL)
+}
+
+outlier_count_plot <- function(df_before, df_after, fname = "13_outlier_counts.png") {
+  kept_cols <- intersect(colnames(df_before), colnames(df_after))
+  if (length(kept_cols) == 0) return(invisible(NULL))
+  
+  count_outliers <- function(x) {
+    if (!is.numeric(x)) return(NA_integer_)
+    q1 <- quantile(x, 0.25, na.rm = TRUE)
+    q3 <- quantile(x, 0.75, na.rm = TRUE)
+    iqr <- q3 - q1
+    lower_bound <- q1 - 1.5 * iqr
+    upper_bound <- q3 + 1.5 * iqr
+    sum(x < lower_bound | x > upper_bound, na.rm = TRUE)
+  }
+  
+  before_counts <- sapply(df_before[, kept_cols, drop = FALSE], count_outliers)
+  after_counts <- sapply(as.data.frame(df_after)[, kept_cols, drop = FALSE], count_outliers)
+  
+  count_df <- tibble(
+    Variable = rep(kept_cols, 2),
+    Count = c(before_counts, after_counts),
+    State = rep(c("Before", "After"), each = length(kept_cols))
+  ) %>%
+    filter(!is.na(Count) & Count > 0)
+  
+  if (nrow(count_df) == 0) {
+    cat("No outliers detected in any variables.\n")
+    return(invisible(NULL))
+  }
+  
+  var_order <- count_df %>% 
+    filter(State == "Before") %>% 
+    arrange(desc(Count)) %>% 
+    pull(Variable)
+  
+  count_df$Variable <- factor(count_df$Variable, levels = var_order)
+  count_df$State <- factor(count_df$State, levels = c("Before", "After"))
+  
+  p <- ggplot(count_df, aes(x = Variable, y = Count, fill = State)) +
+    geom_col(position = "dodge") +
+    geom_text(aes(label = Count), position = position_dodge(width = 0.9), vjust = -0.3, size = 3) +
     scale_fill_manual(values = c("Before" = "#FF6347", "After" = "#4682B4")) +
     labs(
-      title = "Distribution of Numeric Predictors Before and After Transformation",
-      subtitle = "Each row is a predictor; columns show the distribution before vs. after.",
-      x = "Value (Scales are independent for each plot)",
-      y = "Frequency"
+      title = "Number of Outliers Before and After Transformation",
+      subtitle = "Outliers defined by the 1.5 * IQR rule. Variables with no outliers are hidden.",
+      x = NULL, y = "Outlier Count"
     ) +
-    theme_minimal(base_size = 10) +
-    theme(strip.text.y = element_text(angle = 0, hjust = 1))
+    theme_minimal(base_size = 13) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
   
   print(p)
-  gsave(fname, p, width = 8, height = max(8, 1.5 * length(kept_cols)), dpi = 150)
+  gsave(fname, p, width = 10, height = 7)
   invisible(p)
 }
 
-# ------------------------------------------------------------------------------
-# FIX: Robust one-hot encoder (no dummyVars, no contrast errors)
-# ------------------------------------------------------------------------------
 ohe_prepare <- function(train_cat_df, test_cat_df, out_dir, report = "03_removed_single_level_cats.csv") {
   if (!ncol(train_cat_df)) {
     return(list(train = data.frame(), test = data.frame(), removed = character()))
@@ -295,7 +355,7 @@ train_cat_ohe <- ohe$train
 test_cat_ohe  <- ohe$test
 
 train_num <- train_x_num
-test_num  <- test_x_num
+test_num  <- test_num
 X_train_all <- bind_cols(train_num, train_cat_ohe)
 X_test_all  <- bind_cols(test_num,  test_cat_ohe)
 
@@ -316,11 +376,21 @@ pp_box <- caret::preProcess(X_train_pos, method = c("BoxCox","center","scale"))
 X_train_bc <- predict(pp_box, X_train_pos)
 X_test_bc  <- predict(pp_box, X_test_pos)
 
-cor_heatmap(X_train_bc, "03_corr_heatmap.png")
+# --- MODIFIED: Generate heatmaps before and after pruning ---
+# 1. Plot heatmap BEFORE removing highly correlated predictors
+cor_heatmap(X_train_bc, "03_corr_heatmap_before_removal.png")
+
+# 2. Identify and remove predictors with correlation > cutoff
 cor_pruned <- cor_drop(X_train_bc, cutoff = CFG$cor_cutoff)
 X_train_bc <- cor_pruned$X
 X_test_bc  <- X_test_bc[, colnames(X_train_bc), drop = FALSE]
 write.csv(data.frame(removed_high_corr = cor_pruned$removed), file.path(CFG$out_dir,"04_removed_high_corr.csv"), row.names = FALSE)
+
+# 3. Plot heatmap AFTER removal for comparison (if any were removed)
+if (length(cor_pruned$removed) > 0) {
+  cor_heatmap(X_train_bc, "03a_corr_heatmap_after_removal.png")
+}
+# -------------------------------------------------------------
 
 pp_ss <- caret::preProcess(X_train_bc, method = "spatialSign")
 X_train_ss <- predict(pp_ss, X_train_bc)
@@ -333,6 +403,8 @@ k_pc <- which(cumvar >= CFG$pca_var_thresh)[1]
 if (is.na(k_pc)) k_pc <- min(1, ncol(pc_fit$x))
 X_train_pc <- pc_fit$x[, 1:k_pc, drop = FALSE]
 X_test_pc  <- scale(X_test_bc, center = pc_fit$center, scale = pc_fit$scale) %*% pc_fit$rotation[, 1:k_pc, drop = FALSE]
+
+cor_heatmap(as.data.frame(X_train_pc), fname = "12_corr_heatmap_pca.png")
 
 train_base <- bind_cols(as.data.frame(X_train_bc), tibble(!!response := train[[response]]))
 test_base  <- bind_cols(as.data.frame(X_test_bc),  tibble(!!response := test[[response]]))
@@ -368,7 +440,8 @@ write.csv(sk_tab, file.path(CFG$out_dir,"08_skewness_before_after_boxcox.csv"), 
 # --- CALLS TO PLOTTING FUNCTIONS ---
 skewness_plot(sk_tab)
 outlier_plot(train_x_num, X_train_bc)
-skewness_hist_plots(train_x_num, X_train_bc) # New call for individual histograms
+skewness_hist_plots(train_x_num, X_train_bc)
+outlier_count_plot(train_x_num, X_train_bc)
 
 # Decisions summary
 dec_lines <- c(
@@ -421,20 +494,28 @@ rmd <- c(
   "- Box-Cox (shifted to positive), then center/scale",
   "",
   "## Correlations",
-  "![](03_corr_heatmap.png){height=0.6\\textheight}",
+  "![](03_corr_heatmap_before_removal.png){height=0.6\\textheight}",
   paste0("- High-correlation removal at |r|>", CFG$cor_cutoff),
   "",
   "## Skewness Reduction",
   "![](09_skewness_distribution.png){height=0.6\\textheight}",
   "- Box-Cox transform significantly reduced skewness in numeric predictors.",
   "",
-  "## Outlier Mitigation",
+  "## Outlier Mitigation (Boxplots)",
   "![](10_outliers_before_after.png){height=0.6\\textheight}",
   "- Transformations also help in managing the influence of outliers.",
+  "",
+  "## Outlier Reduction (Counts)",
+  "![](13_outlier_counts.png){height=0.6\\textheight}",
+  "- The number of outliers is significantly reduced after transformation.",
   "",
   "## PCA",
   "![](06_pca_scree.png){height=0.55\\textheight}",
   paste0("- Retained ", k_pc, " PCs (≥", round(CFG$pca_var_thresh*100), "% variance)"),
+  "",
+  "## PCA Correlation Check",
+  "![](12_corr_heatmap_pca.png){height=0.6\\textheight}",
+  "- Heatmap confirms PCA components are uncorrelated.",
   "",
   "## Spatial Sign",
   "- Alternate set to mitigate outliers",

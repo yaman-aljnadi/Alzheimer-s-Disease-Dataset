@@ -26,20 +26,28 @@ Predict patient readmission using EHR predictors.
 - Box-Cox (shifted to positive), then center/scale
 
 ## Correlations
-![](03_corr_heatmap.png){height=0.6\textheight}
+![](03_corr_heatmap_before_removal.png){height=0.6\textheight}
 - High-correlation removal at |r|>0.9
 
 ## Skewness Reduction
 ![](09_skewness_distribution.png){height=0.6\textheight}
 - Box-Cox transform significantly reduced skewness in numeric predictors.
 
-## Outlier Mitigation
+## Outlier Mitigation (Boxplots)
 ![](10_outliers_before_after.png){height=0.6\textheight}
 - Transformations also help in managing the influence of outliers.
+
+## Outlier Reduction (Counts)
+![](13_outlier_counts.png){height=0.6\textheight}
+- The number of outliers is significantly reduced after transformation.
 
 ## PCA
 ![](06_pca_scree.png){height=0.55\textheight}
 - Retained 39 PCs (≥95% variance)
+
+## PCA Correlation Check
+![](12_corr_heatmap_pca.png){height=0.6\textheight}
+- Heatmap confirms PCA components are uncorrelated.
 
 ## Spatial Sign
 - Alternate set to mitigate outliers
