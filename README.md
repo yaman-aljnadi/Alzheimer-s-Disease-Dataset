@@ -1,2 +1,2 @@
-# Alzheimer-s-Disease-Dataset
+# Diabetic Patients' Dataset
 Alzheimer's Disease Dataset
