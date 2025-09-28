@@ -1,0 +1,56 @@
+---
+title: "Preprocessing Presentation"
+subtitle: "Diabetes Readmission"
+author: "Group"
+output: beamer_presentation
+fontsize: 11pt
+---
+
+## Goal
+Predict patient readmission using EHR predictors.
+
+## Data Structure
+- Sample size: 25000
+- Response: readmitted
+- Predictors: 46 (35 categorical, 11 numeric)
+
+## Class Distribution
+![](01_class_distribution.png){height=0.6\textheight}
+
+## Missingness
+![](02_missingness.png){height=0.6\textheight}
+
+## One-Hot + Impute + Box-Cox + Center/Scale
+- Robust OHE (single-level train cats dropped; unseen test levels → Other)
+- kNN imputation (k=5)
+- Box-Cox (shifted to positive), then center/scale
+
+## Correlations
+![](03_corr_heatmap.png){height=0.6\textheight}
+- High-correlation removal at |r|>0.9
+
+## Skewness Reduction
+![](09_skewness_distribution.png){height=0.6\textheight}
+- Box-Cox transform significantly reduced skewness in numeric predictors.
+
+## Outlier Mitigation
+![](10_outliers_before_after.png){height=0.6\textheight}
+- Transformations also help in managing the influence of outliers.
+
+## PCA
+![](06_pca_scree.png){height=0.55\textheight}
+- Retained 39 PCs (≥95% variance)
+
+## Spatial Sign
+- Alternate set to mitigate outliers
+
+## Train/Test & Resampling
+- Split: 80% train / 20% test (stratified)
+![](07_resampling_panels.png){height=0.6\textheight}
+- Upsampled and downsampled sets prepared
+
+## What We'll Use For Modeling
+- Start with Box-Cox + center/scale + correlation pruning
+- Compare: with/without PCA (39 PCs)
+- Evaluate with original vs upsampled training
+- Keep spatial-sign variant for robustness checks

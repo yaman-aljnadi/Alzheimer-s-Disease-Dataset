@@ -1,0 +1,16 @@
+Goal: Predict patient readmission
+Sample size: 25000
+Response: readmitted
+# predictors: 46
+# categorical predictors: 35
+# numeric predictors: 11
+Train/Test split: 80% / 20%
+Imputation: kNN (k=5) on numeric after one-hot
+Dummy variables: robust OHE via model.matrix with 'Other' mapping; single-level train cats dropped
+Near-zero variance removal: applied
+Box-Cox: applied after shifting variables to positive; with centering/scaling
+High correlation removal: cutoff |r|>0.9; removed 5 predictors
+PCA: 39 components for ≥95% variance
+Spatial sign: alternate train/test set produced
+Class imbalance (train): <30/>30/NO counts = 2316/6959/10726
+Resampling sets: upsampled and downsampled versions created for model comparison

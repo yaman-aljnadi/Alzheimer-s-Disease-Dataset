@@ -1,22 +1,13 @@
-# 01_preprocess_diabetes.R
-# Clean, modular preprocessing + EDA pipeline for diabetic_data_project.csv
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Setup
-# ──────────────────────────────────────────────────────────────────────────────
 suppressPackageStartupMessages({
   library(dplyr)
-  library(ggplot2)
   library(tidyr)
+  library(ggplot2)
   library(caret)
   library(reshape2)
   library(e1071)
+  library(stringr)
+  library(rlang)
 })
-
-# If you use robust Mahalanobis (optional):
-# install.packages("robustbase")
-# If caret::preProcess(knnImpute) complains, ensure RANN is available:
-# install.packages("RANN")
 
 CFG <- list(
   data_path = "../Datasets/diabetic_data_project.csv",
@@ -24,495 +15,441 @@ CFG <- list(
   seed      = 123,
   out_dir   = "outputs",
   save_plots = TRUE,
-  k_knn     = 5,
-  cor_keep_threshold = 0.20  # keep vars with |max corr| ≥ threshold for heatmap
+  train_prop = 0.80,
+  k_knn = 5,
+  nzv_freq_cut = 95/5,
+  cor_cutoff = 0.90,
+  pca_var_thresh = 0.95
 )
 
 set.seed(CFG$seed)
 if (!dir.exists(CFG$out_dir)) dir.create(CFG$out_dir, recursive = TRUE)
 
 gsave <- function(filename, plot = last_plot(), width = 8, height = 6, dpi = 300) {
-  if (isTRUE(CFG$save_plots)) {
-    ggsave(file.path(CFG$out_dir, filename), plot = plot, width = width, height = height, dpi = dpi)
-  }
+  if (isTRUE(CFG$save_plots)) ggsave(file.path(CFG$out_dir, filename), plot = plot, width = width, height = height, dpi = dpi)
 }
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
+replace_q_na <- function(df) { df[df == "?"] <- NA; df }
 
-replace_question_with_na <- function(df) {
-  df[df == "?"] <- NA
-  df
-}
-
-type_splits <- function(df, response) {
+split_types <- function(df, response) {
   list(
-    cat = setdiff(names(Filter(is.character, df)), response),
-    num = setdiff(names(Filter(is.numeric,   df)), response)
+    cat = setdiff(names(Filter(function(x) is.character(x) || is.factor(x), df)), response),
+    num = setdiff(names(Filter(is.numeric, df)), response)
   )
 }
 
-plot_response_dist <- function(df, response) {
-  resp_df <- df %>%
-    group_by(!!rlang::sym(response)) %>%
-    summarise(Count = n(), .groups = "drop") %>%
-    mutate(Percentage = Count / sum(Count) * 100)
-  
-  p <- ggplot(resp_df, aes(x = !!rlang::sym(response), y = Count, fill = Percentage)) +
-    geom_col(width = 0.6) +
-    geom_text(aes(label = paste0(Count, " (", round(Percentage,1), "%)")),
-              vjust = -0.5, size = 4) +
-    scale_fill_gradient(low = "#99CCFF", high = "#0066CC") +
-    labs(title = "Class Distribution of Response Variable", x = "Class", y = "Count") +
-    theme_minimal(base_size = 14) +
-    theme(plot.title = element_text(face = "bold", size = 16),
-          axis.title = element_text(face = "bold"),
-          axis.text  = element_text(color = "black"),
-          legend.position = "none") +
-    ylim(0, max(resp_df$Count) * 1.1)
-  print(p); gsave("class_distribution.png", p, 7, 5)
-  invisible(resp_df)
+plot_response <- function(df, response) {
+  a <- df %>% count(!!rlang::sym(response), name = "Count") %>% mutate(Perc = round(100*Count/sum(Count),1))
+  p <- ggplot(a, aes(!!rlang::sym(response), Count, fill = !!rlang::sym(response))) +
+    geom_col(width = .65, show.legend = FALSE) +
+    geom_text(aes(label = paste0(Count, " (", Perc, "%)")), vjust = -0.4, size = 4) +
+    labs(title = "Class distribution", x = NULL, y = "Count") +
+    theme_minimal(base_size = 13)
+  print(p); gsave("01_class_distribution.png", p, 7, 5)
+  invisible(a)
 }
 
-missing_table_plot <- function(df) {
-  miss_pct <- colSums(is.na(df)) / nrow(df) * 100
-  miss_df <- data.frame(Column = names(miss_pct),
-                        MissingPercent = as.numeric(miss_pct)) %>%
-    filter(MissingPercent > 0) %>%
-    arrange(desc(MissingPercent))
+missing_plot <- function(df) {
+  m <- colSums(is.na(df))/nrow(df)*100
+  d <- tibble(Column = names(m), Missing = as.numeric(m)) %>% filter(Missing>0) %>% arrange(desc(Missing))
+  if (nrow(d)==0) return(invisible(d))
+  p <- ggplot(d, aes(reorder(Column, Missing), Missing)) +
+    geom_col(width=.7, fill="#FF6347") + coord_flip() +
+    geom_text(aes(label=paste0(round(Missing,1),"%")), hjust=-0.1) +
+    labs(title="Missing values by column", x=NULL, y="%") +
+    theme_minimal(base_size = 13)
+  print(p); gsave("02_missingness.png", p, 8, 6)
+  invisible(d)
+}
+
+nzv_drop <- function(X, freqCut = 95/5) {
+  nzv_idx <- nearZeroVar(X, freqCut = freqCut, saveMetrics = FALSE)
+  if (length(nzv_idx)) X <- X[, -nzv_idx, drop = FALSE]
+  X
+}
+
+cor_drop <- function(X, cutoff = 0.90) {
+  if (ncol(X) < 2) return(list(X = X, removed = character()))
+  cmat <- suppressWarnings(cor(X, use = "pairwise.complete.obs"))
+  bad <- findCorrelation(cmat, cutoff = cutoff, names = TRUE, exact = TRUE)
+  if (length(bad)) X <- X[, setdiff(colnames(X), bad), drop = FALSE]
+  list(X = X, removed = bad)
+}
+
+cor_heatmap <- function(X, fname="03_corr_heatmap.png") {
+  if (ncol(X) < 2) return(invisible(NULL))
+  C <- suppressWarnings(cor(X, use="pairwise.complete.obs"))
+  C[upper.tri(C, diag=TRUE)] <- NA
+  d <- reshape2::melt(C, na.rm = TRUE, varnames=c("Var1","Var2"), value.name="r")
+  p <- ggplot(d, aes(Var1, Var2, fill = r)) +
+    geom_raster() +
+    scale_fill_gradient2(limits=c(-1,1), low="blue", mid="white", high="red", midpoint=0) +
+    theme_minimal(base_size = 10) + theme(axis.text.x=element_text(angle=90,vjust=0.5,hjust=1)) +
+    labs(title="Correlation heatmap", x=NULL, y=NULL, fill="r")
+  print(p); gsave(fname, p, 9, 7)
+}
+
+scree_plot <- function(pc, fname="06_pca_scree.png") {
+  var <- pc$sdev^2
+  pvar <- var/sum(var)
+  df <- tibble(PC = seq_along(pvar), Prop = pvar, Cum = cumsum(pvar))
+  p <- ggplot(df, aes(PC, Prop)) + geom_point() + geom_line() + 
+    geom_line(aes(y=Cum), linetype="dashed") +
+    labs(title="PCA variance (points) & cumulative (dashed)", x="Component", y="Variance proportion") +
+    theme_minimal(base_size = 13)
+  print(p); gsave(fname, p, 7, 5)
+  invisible(df)
+}
+
+class_panels <- function(train_df, up_df, down_df, response) {
+  z <- bind_rows(
+    train_df %>% count(!!rlang::sym(response), name="Count") %>% mutate(Set="Train"),
+    up_df    %>% count(!!rlang::sym(response), name="Count") %>% mutate(Set="Upsampled"),
+    down_df  %>% count(!!rlang::sym(response), name="Count") %>% mutate(Set="Downsampled")
+  ) %>% group_by(Set) %>% mutate(Perc = round(100*Count/sum(Count),1)) %>% ungroup()
+  p <- ggplot(z, aes(!!rlang::sym(response), Count, fill=!!rlang::sym(response))) +
+    geom_col(width=.65, show.legend = FALSE) +
+    geom_text(aes(label=paste0(Count," (",Perc,"%)")), vjust=-0.4, size=3.6) +
+    facet_wrap(~Set, ncol = 1, scales = "free_y") +
+    labs(title="Class distribution: original vs resampled", x=NULL, y="Count") +
+    theme_minimal(base_size = 12)
+  print(p); gsave("07_resampling_panels.png", p, 7, 9)
+}
+
+skewness_plot <- function(sk_df, fname = "09_skewness_distribution.png") {
+  sk_long <- sk_df %>%
+    select(Before, After) %>%
+    tidyr::pivot_longer(cols = everything(), names_to = "State", values_to = "Skewness")
   
-  if (nrow(miss_df) == 0) {
-    message("No missing values detected.")
-    return(miss_df)
+  p <- ggplot(sk_long, aes(x = Skewness, fill = State)) +
+    geom_density(alpha = 0.6, na.rm = TRUE, adjust = 1.5) +
+    scale_fill_manual(values = c("Before" = "#FF6347", "After" = "#4682B4")) +
+    labs(
+      title = "Distribution of Skewness Before and After Box-Cox",
+      subtitle = "Applied to numeric predictors. 'After' values are much closer to zero.",
+      x = "Skewness Value", y = "Density", fill = "Transformation State"
+    ) +
+    theme_minimal(base_size = 13)
+  print(p)
+  gsave(fname, p, 9, 6)
+  invisible(p)
+}
+
+outlier_plot <- function(df_before, df_after, fname = "10_outliers_before_after.png") {
+  kept_cols <- intersect(colnames(df_before), colnames(df_after))
+  if (length(kept_cols) == 0) return(invisible(NULL))
+  
+  df_before <- df_before[, kept_cols, drop = FALSE]
+  df_after <- df_after[, kept_cols, drop = FALSE]
+  
+  long_before <- df_before %>%
+    tidyr::pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value") %>%
+    mutate(State = "Before")
+  
+  long_after <- df_after %>%
+    as.data.frame() %>% 
+    tidyr::pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value") %>%
+    mutate(State = "After")
+  
+  combined <- bind_rows(long_before, long_after) %>%
+    mutate(State = factor(State, levels = c("Before", "After")))
+  
+  p <- ggplot(combined, aes(x = State, y = Value, fill = State)) +
+    geom_boxplot(show.legend = FALSE, outlier.size = 1) +
+    facet_wrap(~Variable, scales = "free_y") +
+    scale_fill_manual(values = c("Before" = "#FF6347", "After" = "#4682B4")) +
+    labs(
+      title = "Outlier Comparison Before and After Transformation",
+      subtitle = "Boxplots per variable. 'After' is Box-Cox transformed, centered, and scaled. Note free y-axes.",
+      x = NULL, y = "Value (Variable-specific Scale)"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(strip.text = element_text(size = 8))
+  
+  print(p)
+  gsave(fname, p, width = 12, height = 9, dpi = 300)
+  invisible(p)
+}
+
+# --- NEW FUNCTION: Individual Skewness Histograms ---
+skewness_hist_plots <- function(df_before, df_after, fname = "11_skewness_histograms.png") {
+  # Keep only original numeric columns that survived processing
+  kept_cols <- intersect(colnames(df_before), colnames(df_after))
+  if (length(kept_cols) == 0) return(invisible(NULL))
+  
+  df_before <- df_before[, kept_cols, drop = FALSE]
+  df_after <- df_after[, kept_cols, drop = FALSE]
+  
+  # Reshape data for plotting
+  long_before <- df_before %>%
+    tidyr::pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value") %>%
+    mutate(State = "Before")
+  
+  long_after <- df_after %>%
+    as.data.frame() %>%
+    tidyr::pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value") %>%
+    mutate(State = "After")
+  
+  # Combine and set factor order
+  combined <- bind_rows(long_before, long_after) %>%
+    mutate(State = factor(State, levels = c("Before", "After")))
+  
+  # Create the faceted histogram plot
+  p <- ggplot(combined, aes(x = Value, fill = State)) +
+    geom_histogram(bins = 30, show.legend = FALSE) +
+    facet_grid(Variable ~ State, scales = "free") +
+    scale_fill_manual(values = c("Before" = "#FF6347", "After" = "#4682B4")) +
+    labs(
+      title = "Distribution of Numeric Predictors Before and After Transformation",
+      subtitle = "Each row is a predictor; columns show the distribution before vs. after.",
+      x = "Value (Scales are independent for each plot)",
+      y = "Frequency"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(strip.text.y = element_text(angle = 0, hjust = 1))
+  
+  print(p)
+  gsave(fname, p, width = 8, height = max(8, 1.5 * length(kept_cols)), dpi = 150)
+  invisible(p)
+}
+
+# ------------------------------------------------------------------------------
+# FIX: Robust one-hot encoder (no dummyVars, no contrast errors)
+# ------------------------------------------------------------------------------
+ohe_prepare <- function(train_cat_df, test_cat_df, out_dir, report = "03_removed_single_level_cats.csv") {
+  if (!ncol(train_cat_df)) {
+    return(list(train = data.frame(), test = data.frame(), removed = character()))
   }
   
-  p <- ggplot(miss_df, aes(x = reorder(Column, MissingPercent), y = MissingPercent)) +
-    geom_col(fill = "#FF6347", width = 0.7) +
-    geom_text(aes(label = paste0(round(MissingPercent, 1), "%")),
-              hjust = -0.2, size = 4, color = "black") +
-    coord_flip() +
-    labs(title = "Missing Values by Column",
-         subtitle = "Only columns with missing values are shown",
-         x = "Columns", y = "Missing Percentage (%)") +
-    theme_minimal(base_size = 14) +
-    theme(plot.title = element_text(face = "bold", size = 16),
-          plot.subtitle = element_text(size = 12, color = "gray30"),
-          axis.title = element_text(face = "bold"),
-          axis.text  = element_text(color = "black")) +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
-  print(p); gsave("missing_values.png", p, 8, 6)
-  invisible(miss_df)
+  norm_chars <- function(df) {
+    df <- mutate(df, across(everything(), ~ as.character(.)))
+    df <- mutate(df, across(everything(), ~ stringr::str_squish(.)))
+    df[] <- lapply(df, function(x) { x[is.na(x) | x == ""] <- "Unknown"; x })
+    df
+  }
+  train_cat_df <- norm_chars(train_cat_df)
+  test_cat_df  <- norm_chars(test_cat_df)
+  
+  keep <- vapply(train_cat_df, function(x) dplyr::n_distinct(x) > 1, logical(1))
+  removed <- names(train_cat_df)[!keep]
+  train_cat_df <- train_cat_df[, keep, drop = FALSE]
+  test_cat_df  <- test_cat_df[,  keep, drop = FALSE]
+  if (length(removed)) {
+    write.csv(data.frame(removed_single_level = removed),
+              file.path(out_dir, report), row.names = FALSE)
+  }
+  if (!ncol(train_cat_df)) return(list(train = data.frame(), test = data.frame(), removed = removed))
+  
+  for (nm in names(train_cat_df)) {
+    tr <- train_cat_df[[nm]]
+    te <- test_cat_df[[nm]]
+    tr_levs <- sort(unique(tr))
+    all_levs <- unique(c(tr_levs, "Other"))
+    te2 <- ifelse(te %in% tr_levs, te, "Other")
+    train_cat_df[[nm]] <- factor(tr, levels = all_levs)
+    test_cat_df[[nm]]  <- factor(te2, levels = all_levs)
+  }
+  
+  form <- as.formula(paste("~", paste(sprintf("`%s`", names(train_cat_df)), collapse = " + "), "- 1"))
+  X_train <- as.data.frame(model.matrix(form, data = train_cat_df))
+  X_test  <- as.data.frame(model.matrix(form, data = test_cat_df))
+  list(train = X_train, test = X_test, removed = removed)
 }
 
-one_hot <- function(df, drop = NULL) {
-  if (!is.null(drop)) df <- dplyr::select(df, -all_of(drop))
-  dv <- caret::dummyVars(~ ., data = df, sep = "_", fullRank = TRUE)
-  as.data.frame(predict(dv, newdata = df))
-}
+# ------------------------------------------------------------------------------
 
-safe_knn_impute <- function(df, k = 5) {
-  # caret::preProcess(knnImpute) requires all-numeric
-  stopifnot(all(vapply(df, is.numeric, logical(1))))
-  pp <- caret::preProcess(df, method = "knnImpute", k = k)
-  predict(pp, df)
-}
+data_raw <- read.csv(CFG$data_path, stringsAsFactors = FALSE)
+data <- replace_q_na(data_raw)
 
-plot_correlation_heatmap <- function(X, keep_threshold = 0.2, fname = "correlation_heatmap.png") {
-  stopifnot(all(vapply(X, is.numeric, logical(1))))
-  cor_mat <- cor(X, use = "pairwise.complete.obs")
-  # keep variables with some signal
-  abs_max <- apply(abs(cor_mat), 1, function(r) {
-    r <- r[is.finite(r) & !is.na(r)]
-    if (!length(r)) 0 else max(r[r < 0.999], na.rm = TRUE)
-  })
-  keep <- abs_max >= keep_threshold
-  cor_small <- if (sum(keep) >= 2) cor_mat[keep, keep, drop = FALSE] else cor_mat
-  
-  # order by clustering for structure
-  d   <- as.dist(1 - abs(cor_small))
-  hc  <- hclust(d, method = "average")
-  ord <- hc$order
-  cor_ord <- cor_small[ord, ord, drop = FALSE]
-  
-  cor_long <- melt(cor_ord, varnames = c("Var1", "Var2"), value.name = "Correlation")
-  p <- ggplot(cor_long, aes(Var1, Var2, fill = Correlation)) +
-    geom_raster(na.rm = TRUE) +
-    scale_fill_gradient2(limits = c(-1, 1), midpoint = 0, low = "blue", mid = "white", high = "red") +
-    coord_fixed() + labs(title = "Correlation Heatmap (after one-hot)", x = NULL, y = NULL, fill = "r") +
-    theme_minimal(base_size = 11) +
-    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1, color = "black"),
-          axis.text.y = element_text(color = "black"),
-          panel.grid = element_blank())
-  print(p); gsave(fname, p, 10, 8)
-}
-
-facet_boxplots <- function(df_num, fname = "numeric_boxplots.png") {
-  long <- df_num %>% pivot_longer(everything(), names_to = "Variable", values_to = "Value")
-  p <- ggplot(long, aes(Variable, Value)) +
-    geom_boxplot(fill = "#1f77b4", outlier.color = "red", outlier.shape = 16) +
-    facet_wrap(~Variable, scales = "free_y", ncol = 6) +
-    theme_minimal(base_size = 12) +
-    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
-          axis.title.x = element_blank(),
-          axis.title.y = element_text(face = "bold"),
-          plot.title = element_text(face = "bold", size = 16, hjust = 0.5)) +
-    labs(title = "Boxplots of Numeric Predictors (Outliers)", y = "Values")
-  print(p); gsave(fname, p, 14, 10)
-}
-
-facet_hist_density <- function(df_num, title, fname) {
-  long <- df_num %>% pivot_longer(everything(), names_to = "Variable", values_to = "Value")
-  p <- ggplot(long, aes(Value)) +
-    geom_histogram(aes(y = ..density..), bins = 30, fill = "#2ca02c", color = "black", alpha = 0.7) +
-    geom_density(size = 1, color = "red") +
-    facet_wrap(~Variable, scales = "free") +
-    theme_minimal(base_size = 12) +
-    theme(axis.title = element_text(face = "bold"),
-          axis.text.x = element_text(angle = 45, hjust = 1, color = "black"),
-          plot.title = element_text(face = "bold", size = 16, hjust = 0.5)) +
-    labs(title = title, x = "Value", y = "Density")
-  print(p); gsave(fname, p, 14, 10)
-}
-
-rank_gauss_fit <- function(x_train) {
-  x_train <- x_train[!is.na(x_train)]
-  n <- length(x_train)
-  eps <- 1/(2*n)
-  Fhat <- ecdf(x_train)
-  list(
-    train = function(x) {
-      r <- rank(x, na.last = "keep", ties.method = "average")
-      qnorm((r - 3/8) / (n + 1/4))
-    },
-    test  = function(x) {
-      p <- Fhat(x)
-      p <- pmin(pmax(p, eps), 1 - eps)
-      qnorm(p)
-    }
-  )
-}
-
-count_classes_tbl <- function(df, response, label) {
-  df %>%
-    count(!!rlang::sym(response), name = "Count") %>%
-    mutate(Percentage = round(100 * Count / sum(Count), 1),
-           Set = label,
-           Class = !!rlang::sym(response)) %>%
-    select(Set, Class, Count, Percentage)
-}
-
-plot_resampling_panels <- function(train_df, train_up, train_down, response) {
-  dist_all <- bind_rows(
-    count_classes_tbl(train_df,   response, "Train (original)"),
-    count_classes_tbl(train_up,   response, "Train (upsampled)"),
-    count_classes_tbl(train_down, response, "Train (downsampled)")
-  )
-  p <- ggplot(dist_all, aes(Class, Count, fill = Class)) +
-    geom_col(width = 0.65) +
-    geom_text(aes(label = paste0(Count, " (", Percentage, "%)")),
-              vjust = -0.4, size = 3.6) +
-    facet_wrap(~ Set, ncol = 1, scales = "free_y") +
-    labs(title = "Class Distribution: Train vs. Resampled", x = "Class", y = "Count") +
-    theme_minimal(base_size = 13) +
-    theme(legend.position = "none",
-          axis.text.x = element_text(color = "black"),
-          axis.text.y = element_text(color = "black"),
-          plot.title = element_text(face = "bold")) +
-    ylim(0, max(dist_all$Count) * 1.15)
-  print(p); gsave("class_distribution_resampling.png", p, 8, 10)
-}
-
-# Univariate outlier diagnostics (IQR / MAD) with plots
-diag_outliers_univariate <- function(df, vars, method = c("IQR","MAD"),
-                                     k = 1.5, c = 3.5, suffix = "train") {
-  method <- match.arg(method)
-  
-  long <- df[, vars, drop = FALSE] %>%
-    mutate(.row = dplyr::row_number()) %>%
-    pivot_longer(-.row, names_to = "Variable", values_to = "Value")
-  
-  thresh <- long %>%
-    group_by(Variable) %>%
-    summarize(
-      Q1  = quantile(Value, 0.25, na.rm = TRUE),
-      Q3  = quantile(Value, 0.75, na.rm = TRUE),
-      IQR = Q3 - Q1,
-      Low_IQR  = Q1 - k*IQR,
-      High_IQR = Q3 + k*IQR,
-      Med = median(Value, na.rm = TRUE),
-      MAD = mad(Value, constant = 1.4826, na.rm = TRUE),
-      .groups = "drop"
-    )
-  
-  long2 <- long %>%
-    left_join(thresh, by = "Variable") %>%
-    mutate(is_out = if (method == "IQR") {
-      (Value < Low_IQR | Value > High_IQR)
-    } else {
-      z = abs(Value - Med) / ifelse(MAD == 0, NA_real_, MAD)
-      z > c
-    })
-  
-  counts <- long2 %>%
-    group_by(Variable) %>%
-    summarize(Outliers = sum(is_out, na.rm = TRUE), .groups = "drop") %>%
-    arrange(desc(Outliers))
-  
-  write.csv(counts, file.path(CFG$out_dir, paste0("outliers_table_", tolower(method), "_", suffix, ".csv")), row.names = FALSE)
-  
-  p_bar <- ggplot(counts, aes(x = reorder(Variable, Outliers), y = Outliers)) +
-    geom_col(width = 0.7, fill = "#d62728") +
-    coord_flip() +
-    labs(title = paste0("Outliers per Variable (", method, ", ", suffix, ")"),
-         x = "Variable", y = "# Outliers") +
-    theme_minimal(base_size = 12) +
-    theme(axis.text = element_text(color = "black"))
-  print(p_bar); gsave(paste0("outliers_count_", tolower(method), "_", suffix, ".png"), p_bar, 8, 10)
-  
-  p_box <- ggplot(long2, aes(x = Variable, y = Value)) +
-    geom_boxplot(outlier.shape = NA, fill = "#1f77b4", alpha = 0.5) +
-    geom_point(data = subset(long2, is_out %in% TRUE),
-               aes(x = Variable, y = Value),
-               color = "red", size = 0.6, alpha = 0.7,
-               position = position_jitter(width = 0.15, height = 0)) +
-    facet_wrap(~ Variable, scales = "free_y", ncol = 6) +
-    labs(title = paste0("Outliers Highlighted (", method, ", ", suffix, ")"),
-         x = NULL, y = "Value") +
-    theme_minimal(base_size = 12) +
-    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
-  print(p_box); gsave(paste0("outliers_facets_", tolower(method), "_", suffix, ".png"), p_box, 14, 10)
-  
-  invisible(list(data = long2, counts = counts))
-}
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 1) Load data, basic info, missingness, response distribution
-# ──────────────────────────────────────────────────────────────────────────────
-data_raw <- read.csv(CFG$data_path)
-data <- replace_question_with_na(data_raw)
-
+goal <- "Predict patient readmission"
 sample_size <- nrow(data)
-num_predictors <- ncol(data) - 1  # assumes 1 response
+response <- CFG$response
+if (!response %in% names(data)) stop("Response not found.")
+data[[response]] <- as.factor(data[[response]])
+types <- split_types(data, response)
+cat("Goal:", goal, "\n")
 cat("Sample size:", sample_size, "\n")
-cat("Number of predictors (excl. response):", num_predictors, "\n")
-cat("Number of response variables:", 1, "\n")
+cat("Response variable:", response, "\n")
+cat("# predictors:", ncol(data)-1, "\n")
+cat("# categorical predictors:", length(types$cat), "\n")
+cat("# numeric predictors:", length(types$num), "\n")
 
-types <- type_splits(data, CFG$response)
-cat("Categorical predictors:", length(types$cat), " | Numeric predictors:", length(types$num), "\n\n")
+plot_response(data, response)
+miss_tbl <- missing_plot(data)
+write.csv(miss_tbl, file.path(CFG$out_dir, "00_missing_table.csv"), row.names = FALSE)
 
-plot_response_dist(data, CFG$response)
-miss_df <- missing_table_plot(data)
+data <- data %>% mutate(across(all_of(types$cat), ~ ifelse(is.na(.), "Unknown", as.character(.))))
 
-# For categorical NAs: make an explicit "Unknown" level (useful pre-split)
-data <- data %>%
-  mutate(across(all_of(types$cat), ~ ifelse(is.na(.), "Unknown", as.character(.))))
+idx <- caret::createDataPartition(y = data[[response]], p = CFG$train_prop, list = FALSE)
+train <- data[idx, , drop = FALSE]
+test  <- data[-idx, , drop = FALSE]
+cat("Train rows:", nrow(train), " Test rows:", nrow(test), "\n")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 2) One-hot encode predictors (response excluded) and KNN-impute (numeric matrix)
-#    → This block feeds correlation heatmap + global numeric diagnostics
-# ──────────────────────────────────────────────────────────────────────────────
-pred_df <- dplyr::select(data, -all_of(CFG$response))
-# Drop single-level / uninformative columns before expanding
-is_usable <- vapply(pred_df, function(x) dplyr::n_distinct(x[!is.na(x)]) >= 2, logical(1))
-pred_df <- pred_df[, is_usable, drop = FALSE]
+train_x_cat <- train[, types$cat, drop = FALSE]
+test_x_cat  <- test[,  types$cat, drop = FALSE]
+train_x_num <- train[, types$num, drop = FALSE]
+test_x_num  <- test[,  types$num, drop = FALSE]
 
-X <- one_hot(pred_df)     # all numeric after dummyVars
-# Remove near-zero-variance columns
-nzv <- nearZeroVar(X)
-if (length(nzv)) X <- X[, -nzv, drop = FALSE]
+ohe <- ohe_prepare(train_x_cat, test_x_cat, out_dir = CFG$out_dir)
+train_cat_ohe <- ohe$train
+test_cat_ohe  <- ohe$test
 
-# Impute any missing numeric values in X
-if (anyNA(X)) {
-  X <- safe_knn_impute(X, k = CFG$k_knn)
+train_num <- train_x_num
+test_num  <- test_x_num
+X_train_all <- bind_cols(train_num, train_cat_ohe)
+X_test_all  <- bind_cols(test_num,  test_cat_ohe)
+
+X_train_all <- nzv_drop(X_train_all, CFG$nzv_freq_cut)
+X_test_all  <- X_test_all[, colnames(X_train_all), drop = FALSE]
+
+if (anyNA(X_train_all)) {
+  imputer <- caret::preProcess(X_train_all, method = "knnImpute", k = CFG$k_knn)
+  X_train_all <- predict(imputer, X_train_all)
+  X_test_all  <- predict(imputer, X_test_all)
 }
 
-# Correlation heatmap + basic numeric plots on X
-plot_correlation_heatmap(X, keep_threshold = CFG$cor_keep_threshold)               # correlation_heatmap.png
-facet_boxplots(X, "numeric_boxplots_facet.png")                                    # boxplots
-facet_hist_density(X, "Distribution and Skewness of Numeric Predictors (OHE)",     # hist+density
-                   "numeric_skewness_ohe.png")
+shift_vec <- vapply(X_train_all, function(x) ifelse(min(x, na.rm=TRUE) <= 0, abs(min(x, na.rm=TRUE)) + 1e-6, 0), numeric(1))
+X_train_pos <- sweep(X_train_all, 2, shift_vec, `+`)
+X_test_pos  <- sweep(X_test_all,  2, shift_vec, `+`)
 
-# Skewness table for X
-skew_values <- sapply(X, function(x) e1071::skewness(x, na.rm = TRUE))
-skew_df <- data.frame(Variable = names(skew_values), Skewness = as.numeric(skew_values)) %>%
-  arrange(desc(abs(Skewness)))
-write.csv(skew_df, file.path(CFG$out_dir, "skewness_ohe_table.csv"), row.names = FALSE)
+pp_box <- caret::preProcess(X_train_pos, method = c("BoxCox","center","scale"))
+X_train_bc <- predict(pp_box, X_train_pos)
+X_test_bc  <- predict(pp_box, X_test_pos)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 3) Train/Test split and numeric-transform pipeline on ORIGINAL numeric vars
-#    (Yeo–Johnson for most; RankGauss for severely skewed)
-# ──────────────────────────────────────────────────────────────────────────────
-data[[CFG$response]] <- factor(data[[CFG$response]])  # ensure factor for stratified split
+cor_heatmap(X_train_bc, "03_corr_heatmap.png")
+cor_pruned <- cor_drop(X_train_bc, cutoff = CFG$cor_cutoff)
+X_train_bc <- cor_pruned$X
+X_test_bc  <- X_test_bc[, colnames(X_train_bc), drop = FALSE]
+write.csv(data.frame(removed_high_corr = cor_pruned$removed), file.path(CFG$out_dir,"04_removed_high_corr.csv"), row.names = FALSE)
 
-# Build a numeric-only frame for imputation on original numeric cols (not OHE)
-orig_numeric <- setdiff(names(Filter(is.numeric, data)), CFG$response)
-num_only <- data[, orig_numeric, drop = FALSE]
-if (anyNA(num_only)) {
-  num_only <- safe_knn_impute(num_only, k = CFG$k_knn)
-}
-# Recombine with categorical (unchanged) + response
-data_num_imputed <- bind_cols(
-  num_only,
-  dplyr::select(data, all_of(c(types$cat, CFG$response)))
+pp_ss <- caret::preProcess(X_train_bc, method = "spatialSign")
+X_train_ss <- predict(pp_ss, X_train_bc)
+X_test_ss  <- predict(pp_ss,  X_test_bc)
+
+pc_fit <- prcomp(X_train_bc, center = FALSE, scale. = FALSE)
+scree <- scree_plot(pc_fit, "06_pca_scree.png")
+cumvar <- cumsum(pc_fit$sdev^2)/sum(pc_fit$sdev^2)
+k_pc <- which(cumvar >= CFG$pca_var_thresh)[1]
+if (is.na(k_pc)) k_pc <- min(1, ncol(pc_fit$x))
+X_train_pc <- pc_fit$x[, 1:k_pc, drop = FALSE]
+X_test_pc  <- scale(X_test_bc, center = pc_fit$center, scale = pc_fit$scale) %*% pc_fit$rotation[, 1:k_pc, drop = FALSE]
+
+train_base <- bind_cols(as.data.frame(X_train_bc), tibble(!!response := train[[response]]))
+test_base  <- bind_cols(as.data.frame(X_test_bc),  tibble(!!response := test[[response]]))
+train_spatial <- bind_cols(as.data.frame(X_train_ss), tibble(!!response := train[[response]]))
+test_spatial  <- bind_cols(as.data.frame(X_test_ss),  tibble(!!response := test[[response]]))
+train_pca <- bind_cols(as.data.frame(X_train_pc), tibble(!!response := train[[response]]))
+test_pca  <- bind_cols(as.data.frame(X_test_pc),  tibble(!!response := test[[response]]))
+
+imb_tbl <- train %>% count(!!rlang::sym(response), name="n") %>% mutate(p = n/sum(n))
+write.csv(imb_tbl, file.path(CFG$out_dir,"05_class_imbalance_train.csv"), row.names = FALSE)
+
+up <- upSample(x = train_base %>% select(-all_of(response)), y = train_base[[response]], yname = response)
+down <- downSample(x = train_base %>% select(-all_of(response)), y = train_base[[response]], yname = response)
+class_panels(train_base, up, down, response)
+
+write.csv(train_base,   file.path(CFG$out_dir, "train_processed_boxcox_cs_corr.csv"), row.names = FALSE)
+write.csv(test_base,    file.path(CFG$out_dir, "test_processed_boxcox_cs_corr.csv"),  row.names = FALSE)
+write.csv(train_spatial,file.path(CFG$out_dir, "train_processed_boxcox_cs_corr_spatial.csv"), row.names = FALSE)
+write.csv(test_spatial, file.path(CFG$out_dir, "test_processed_boxcox_cs_corr_spatial.csv"),  row.names = FALSE)
+write.csv(train_pca,    file.path(CFG$out_dir, "train_processed_boxcox_cs_corr_pca.csv"), row.names = FALSE)
+write.csv(test_pca,     file.path(CFG$out_dir, "test_processed_boxcox_cs_corr_pca.csv"),  row.names = FALSE)
+
+sk_before <- if (length(types$num)) sapply(train_x_num, function(x) e1071::skewness(x, na.rm=TRUE)) else numeric(0)
+sk_after  <- if (length(types$num)) {
+  kept_num <- colnames(train_x_num)[colnames(train_x_num) %in% colnames(X_train_bc)]
+  sapply(as.data.frame(X_train_bc)[, kept_num, drop = FALSE], function(x) e1071::skewness(x, na.rm=TRUE))
+} else numeric(0)
+sk_tab <- tibble(Variable = names(sk_before), Before = as.numeric(sk_before)) %>%
+  left_join(tibble(Variable = names(sk_after), After = as.numeric(sk_after)), by="Variable") %>%
+  mutate(Delta = After - Before) %>% arrange(desc(abs(Before)))
+write.csv(sk_tab, file.path(CFG$out_dir,"08_skewness_before_after_boxcox.csv"), row.names = FALSE)
+
+# --- CALLS TO PLOTTING FUNCTIONS ---
+skewness_plot(sk_tab)
+outlier_plot(train_x_num, X_train_bc)
+skewness_hist_plots(train_x_num, X_train_bc) # New call for individual histograms
+
+# Decisions summary
+dec_lines <- c(
+  paste("Goal:", goal),
+  paste("Sample size:", sample_size),
+  paste("Response:", response),
+  paste("# predictors:", ncol(data)-1),
+  paste("# categorical predictors:", length(types$cat)),
+  paste("# numeric predictors:", length(types$num)),
+  paste("Train/Test split:", paste0(round(CFG$train_prop*100), "% / ", round((1-CFG$train_prop)*100), "%")),
+  paste("Imputation:", paste0("kNN (k=", CFG$k_knn, ") on numeric after one-hot")),
+  paste("Dummy variables:", "robust OHE via model.matrix with 'Other' mapping; single-level train cats dropped"),
+  paste("Near-zero variance removal:", "applied"),
+  paste("Box-Cox:", "applied after shifting variables to positive; with centering/scaling"),
+  paste("High correlation removal:", paste0("cutoff |r|>", CFG$cor_cutoff, "; removed ", length(cor_pruned$removed), " predictors")),
+  paste("PCA:", paste0(k_pc, " components for ≥", round(CFG$pca_var_thresh*100), "% variance")),
+  paste("Spatial sign:", "alternate train/test set produced"),
+  paste("Class imbalance (train):", paste(imb_tbl[[response]], collapse="/"), "counts =", paste(imb_tbl$n, collapse="/")),
+  paste("Resampling sets:", "upsampled and downsampled versions created for model comparison")
 )
+writeLines(dec_lines, con = file.path(CFG$out_dir, "09_decisions_summary.txt"))
 
-# Stratified split
-idx <- createDataPartition(y = data_num_imputed[[CFG$response]], p = 0.80, list = FALSE)
-train_df <- data_num_imputed[idx, , drop = FALSE]
-test_df  <- data_num_imputed[-idx, , drop = FALSE]
-cat("Train rows:", nrow(train_df), " | Test rows:", nrow(test_df), "\n\n")
-
-# Skewness before
-sk_before <- sapply(train_df[, orig_numeric], function(x) e1071::skewness(x, na.rm = TRUE))
-
-# Hybrid transform: Yeo–Johnson for most; RankGauss for severe (|skew| ≥ 8)
-severe_vars <- names(which(abs(sk_before) >= 8))
-yj_vars <- setdiff(orig_numeric, severe_vars)
-
-train_fix <- train_df
-test_fix  <- test_df
-
-# Yeo–Johnson
-if (length(yj_vars)) {
-  pp_yj <- preProcess(train_df[, yj_vars], method = "YeoJohnson")
-  train_fix[, yj_vars] <- predict(pp_yj, train_df[, yj_vars])
-  test_fix[,  yj_vars] <- predict(pp_yj, test_df[,  yj_vars])
-}
-
-# RankGauss for severe variables
-for (v in severe_vars) {
-  rg <- rank_gauss_fit(train_df[[v]])
-  train_fix[[v]] <- rg$train(train_df[[v]])
-  test_fix[[v]]  <- rg$test(test_df[[v]])
-}
-
-# Skewness after + comparison tables + plots
-sk_after <- sapply(train_fix[, orig_numeric], function(x) e1071::skewness(x, na.rm = TRUE))
-sk_compare <- tibble::tibble(
-  Variable = orig_numeric,
-  Before = as.numeric(sk_before[orig_numeric]),
-  After  = as.numeric(sk_after[orig_numeric])
-) %>% mutate(Delta = After - Before) %>%
-  arrange(desc(abs(Before)))
-write.csv(sk_compare, file.path(CFG$out_dir, "skewness_before_after_hybrid.csv"), row.names = FALSE)
-
-sk_long <- sk_compare %>%
-  select(Variable, Before, After) %>%
-  pivot_longer(c(Before, After), names_to = "Stage", values_to = "Skewness") %>%
-  mutate(Variable = factor(Variable, levels = sk_compare$Variable[order(-abs(sk_compare$Before))]))
-
-p_sk <- ggplot(sk_long, aes(x = Variable, y = Skewness, fill = Stage)) +
-  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
-  coord_flip() +
-  labs(title = "Skewness Before vs After (Hybrid: RankGauss for severe; YJ for others)",
-       x = "Variable", y = "Skewness") +
-  theme_minimal(base_size = 13) +
-  theme(axis.text = element_text(color = "black"))
-print(p_sk); gsave("skewness_before_after_bar.png", p_sk, 9, 8)
-
-top_vars <- head(sk_compare$Variable[order(-abs(sk_compare$Before))], 15)
-dens_before <- train_df[, top_vars, drop = FALSE]  %>% mutate(Stage = "Before")
-dens_after  <- train_fix[, top_vars, drop = FALSE] %>% mutate(Stage = "After")
-dens_long <- bind_rows(dens_before, dens_after) %>%
-  pivot_longer(all_of(top_vars), names_to = "Variable", values_to = "Value") %>%
-  group_by(Variable, Stage) %>%
-  mutate(Value_zoom = pmin(Value, quantile(Value, 0.99, na.rm = TRUE))) %>% ungroup()
-
-p_hist <- ggplot(dens_long, aes(x = Value_zoom)) +
-  geom_histogram(aes(y = ..density..), bins = 30, color = "black", alpha = 0.7) +
-  geom_density(size = 1) +
-  facet_grid(Variable ~ Stage, scales = "free") +
-  labs(title = "Distributions Before vs After (trimmed at 99th pct)",
-       x = "Value (trimmed)", y = "Density") +
-  theme_minimal(base_size = 12) +
-  theme(axis.text.x = element_text(color = "black"))
-print(p_hist); gsave("skewness_before_after_hist.png", p_hist, 12, 10)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 4) Class imbalance diagnostics + resampling examples (train only)
-# ──────────────────────────────────────────────────────────────────────────────
-X_train <- train_fix %>% select(-all_of(CFG$response))
-y_train <- train_fix[[CFG$response]]
-train_up   <- upSample(x = X_train, y = y_train, yname = CFG$response)
-train_down <- downSample(x = X_train, y = y_train, yname = CFG$response)
-plot_resampling_panels(train_fix, train_up, train_down, CFG$response)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 5) Optional: Spatial Sign (compare Hybrid vs Hybrid+SpatialSign)
-# ──────────────────────────────────────────────────────────────────────────────
-pp_ss <- preProcess(train_fix[, orig_numeric], method = "spatialSign")
-train_ss <- train_fix; test_ss <- test_fix
-train_ss[, orig_numeric] <- predict(pp_ss, train_fix[, orig_numeric])
-test_ss[,  orig_numeric] <- predict(pp_ss,  test_fix[,  orig_numeric])
-
-sk_hybrid <- sapply(train_fix[, orig_numeric], function(x) e1071::skewness(x, na.rm = TRUE))
-sk_ss     <- sapply(train_ss[,  orig_numeric], function(x) e1071::skewness(x, na.rm = TRUE))
-sk_compare_ss <- tibble::tibble(
-  Variable = orig_numeric,
-  Before   = as.numeric(sk_hybrid[orig_numeric]),
-  After    = as.numeric(sk_ss[orig_numeric])
-) %>% mutate(Delta = After - Before) %>%
-  arrange(desc(abs(Before)))
-write.csv(sk_compare_ss, file.path(CFG$out_dir, "skewness_hybrid_vs_spatial.csv"), row.names = FALSE)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 6) Univariate & multivariate outliers (on Hybrid-transformed TRAIN)
-# ──────────────────────────────────────────────────────────────────────────────
-diag_outliers_univariate(train_fix, orig_numeric, method = "IQR", suffix = "hybrid_train")
-diag_outliers_univariate(train_fix, orig_numeric, method = "MAD", suffix = "hybrid_train")
-
-# Multivariate outliers via Mahalanobis (robust if robustbase available)
-if (!requireNamespace("robustbase", quietly = TRUE)) {
-  message("Package 'robustbase' not installed; using classical covariance for Mahalanobis.")
-  X <- as.matrix(train_fix[, orig_numeric])
-  center <- colMeans(X, na.rm = TRUE)
-  covmat <- cov(X, use = "pairwise.complete.obs")
-} else {
-  X <- as.matrix(train_fix[, orig_numeric])
-  mcd <- robustbase::covMcd(X)
-  center <- mcd$center; covmat <- mcd$cov
-}
-d2  <- mahalanobis(X, center = center, cov = covmat)
-df_ <- length(orig_numeric)
-cut <- qchisq(0.999, df = df_)
-flag <- d2 > cut
-cat("Multivariate outliers flagged (99.9% rule):", sum(flag), "\n")
-
-qq_df <- data.frame(
-  quantile = sort(d2),
-  chisq_q  = qchisq(ppoints(length(d2)), df = df_),
-  outlier  = sort(flag)
+# Rmd deck
+rmd <- c(
+  "---",
+  "title: \"Preprocessing Presentation\"",
+  "subtitle: \"Diabetes Readmission\"",
+  "author: \"Group\"",
+  "output: beamer_presentation",
+  "fontsize: 11pt",
+  "---",
+  "",
+  "## Goal",
+  "Predict patient readmission using EHR predictors.",
+  "",
+  "## Data Structure",
+  paste0("- Sample size: ", sample_size),
+  paste0("- Response: ", response),
+  paste0("- Predictors: ", ncol(data)-1, " (", length(types$cat), " categorical, ", length(types$num), " numeric)"),
+  "",
+  "## Class Distribution",
+  "![](01_class_distribution.png){height=0.6\\textheight}",
+  "",
+  "## Missingness",
+  "![](02_missingness.png){height=0.6\\textheight}",
+  "",
+  "## One-Hot + Impute + Box-Cox + Center/Scale",
+  "- Robust OHE (single-level train cats dropped; unseen test levels → Other)",
+  paste0("- kNN imputation (k=", CFG$k_knn, ")"),
+  "- Box-Cox (shifted to positive), then center/scale",
+  "",
+  "## Correlations",
+  "![](03_corr_heatmap.png){height=0.6\\textheight}",
+  paste0("- High-correlation removal at |r|>", CFG$cor_cutoff),
+  "",
+  "## Skewness Reduction",
+  "![](09_skewness_distribution.png){height=0.6\\textheight}",
+  "- Box-Cox transform significantly reduced skewness in numeric predictors.",
+  "",
+  "## Outlier Mitigation",
+  "![](10_outliers_before_after.png){height=0.6\\textheight}",
+  "- Transformations also help in managing the influence of outliers.",
+  "",
+  "## PCA",
+  "![](06_pca_scree.png){height=0.55\\textheight}",
+  paste0("- Retained ", k_pc, " PCs (≥", round(CFG$pca_var_thresh*100), "% variance)"),
+  "",
+  "## Spatial Sign",
+  "- Alternate set to mitigate outliers",
+  "",
+  "## Train/Test & Resampling",
+  paste0("- Split: ", round(CFG$train_prop*100), "% train / ", round((1-CFG$train_prop)*100), "% test (stratified)"),
+  "![](07_resampling_panels.png){height=0.6\\textheight}",
+  "- Upsampled and downsampled sets prepared",
+  "",
+  "## What We'll Use For Modeling",
+  "- Start with Box-Cox + center/scale + correlation pruning",
+  paste0("- Compare: with/without PCA (", k_pc, " PCs)"),
+  "- Evaluate with original vs upsampled training",
+  "- Keep spatial-sign variant for robustness checks"
 )
-p_qq <- ggplot(qq_df, aes(chisq_q, quantile)) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
-  geom_point(alpha = 0.6) +
-  geom_point(data = subset(qq_df, outlier), color = "red", alpha = 0.9, size = 1) +
-  labs(title = "Robust Mahalanobis Distances vs Chi-square",
-       x = expression(chi^2~quantiles), y = expression(D^2)) +
-  theme_minimal(base_size = 12) +
-  theme(axis.text = element_text(color = "black"))
-print(p_qq); gsave("mahalanobis_chisq_qq.png", p_qq, 7, 5)
+writeLines(rmd, con = file.path(CFG$out_dir, "presentation.Rmd"))
 
-pc <- prcomp(train_fix[, orig_numeric], center = TRUE, scale. = TRUE)
-pc_df <- data.frame(PC1 = pc$x[,1], PC2 = pc$x[,2], outlier = flag)
-p_pc <- ggplot(pc_df, aes(PC1, PC2, color = outlier)) +
-  geom_point(alpha = 0.7, size = 1) +
-  scale_color_manual(values = c("FALSE" = "gray55", "TRUE" = "red")) +
-  labs(title = "Multivariate Outliers in PC Space (99.9% threshold)", color = "Outlier") +
-  theme_minimal(base_size = 12) +
-  theme(axis.text = element_text(color = "black"))
-print(p_pc); gsave("mahalanobis_pc_outliers.png", p_pc, 7, 5)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 7) Persist outputs
-# ──────────────────────────────────────────────────────────────────────────────
-write.csv(train_fix, file.path(CFG$out_dir, "train_processed_hybrid.csv"), row.names = FALSE)
-write.csv(test_fix,  file.path(CFG$out_dir, "test_processed_hybrid.csv"),  row.names = FALSE)
-write.csv(train_ss,  file.path(CFG$out_dir, "train_processed_hybrid_spatial.csv"), row.names = FALSE)
-write.csv(test_ss,   file.path(CFG$out_dir, "test_processed_hybrid_spatial.csv"),  row.names = FALSE)
-
-write.csv(sk_compare %>% transmute(Variable, Before, After, Delta),
-          file.path(CFG$out_dir, "skewness_before_after_table.csv"), row.names = FALSE)
-
-cat("Files written to", normalizePath(CFG$out_dir), "\n")
+cat("Files written to:", normalizePath(CFG$out_dir), "\n")
