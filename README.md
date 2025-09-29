@@ -61,14 +61,17 @@ This project focuses on **predicting whether diabetic patients are readmitted to
 * Interpret feature importance to provide actionable insights for healthcare providers.
 
 
-##  Repository Structure
----
 
+
+##  Repository Structure
+```
 ├── data/                 # Raw and processed datasets
-├── figures/            # All the figures after data processing
-├── Codes/              # Python/R scripts for reproducible workflows
-├── Explorted Results/              # Outputs such as plots and metrics
+├── notebooks/            # Jupyter notebooks for exploration and preprocessing
+├── scripts/              # Python/R scripts for reproducible workflows
+├── results/              # Outputs such as plots and metrics
 └── README.md             # Project overview
+```
+
 ---
 
 ## Importance
@@ -93,5 +96,8 @@ MS.C. Student | Data Science  | Michigan Technological University
 
 **Ananna Biswas**
 Ph.D. Student | Computational Science & Engineering | Michigan Technological University
+
+
+
 
 
