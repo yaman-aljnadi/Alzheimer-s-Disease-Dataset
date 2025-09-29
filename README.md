@@ -62,14 +62,14 @@ This project focuses on **predicting whether diabetic patients are readmitted to
 
 
 ##  Repository Structure
-
+---
 
 ├── data/                 # Raw and processed datasets
 ├── figures/            # All the figures after data processing
 ├── Codes/              # Python/R scripts for reproducible workflows
 ├── Explorted Results/              # Outputs such as plots and metrics
 └── README.md             # Project overview
-
+---
 
 ## Importance
 
