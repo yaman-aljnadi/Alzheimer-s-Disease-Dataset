@@ -25,9 +25,10 @@ This project focuses on **predicting whether diabetic patients are readmitted to
   * Hospitalization details (discharge disposition, length of stay, number of procedures)
 * **Response variable:**
 
-  * 3 Classes as outcomes: *Readmitted within 30 days*, class 2
-                           *Readmitted more than 30 days*, class 1
-                           *No readmission*, class 0
+  * 3 Classes as outcomes:
+  * *Readmitted within 30 days*, class 2
+  * *Readmitted more than 30 days*, class 1
+  * *No readmission*, class 0
 
 ## Data Exploration
 
