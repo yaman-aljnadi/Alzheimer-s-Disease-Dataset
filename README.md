@@ -4,7 +4,7 @@
 
 This project focuses on **predicting whether diabetic patients are readmitted to the hospital within 30 days of discharge**. The dataset includes demographic, clinical, and treatment-related variables collected during hospital encounters. The goal is to prepare and preprocess the data for building accurate machine learning models that can support healthcare providers in reducing avoidable readmissions.
 
----
+
 
 ## Project Objectives
 
@@ -14,7 +14,6 @@ This project focuses on **predicting whether diabetic patients are readmitted to
 * Split the data into training and testing sets for reliable model evaluation.
 * Build the foundation for predictive modeling of early diabetic patient readmission.
 
----
 
 ## Dataset Overview
 
@@ -29,7 +28,6 @@ This project focuses on **predicting whether diabetic patients are readmitted to
   * 3 Classes as outcomes: *Readmitted within 30 days*, class 2
                            *Readmitted more than 30 days*, class 1
                            *No readmission*, class 0
----
 
 ## Data Exploration
 
@@ -37,8 +35,6 @@ This project focuses on **predicting whether diabetic patients are readmitted to
 * Identified missing values across several variables.
 * Found **class imbalance** between readmitted vs non-readmitted patients.
 * Detected **skewness** in continuous predictors and presence of outliers.
-
----
 
 ## Data Preprocessing
 
@@ -48,7 +44,6 @@ This project focuses on **predicting whether diabetic patients are readmitted to
 4. **Scaling**: Standardized all predictors to ensure fair contribution across features.
 5. **Outlier Handling**: Applied **Spatial Sign transformation** to reduce the influence of extreme values.
 
----
 
 ## Data Splitting
 
@@ -56,7 +51,7 @@ This project focuses on **predicting whether diabetic patients are readmitted to
 * Used **stratified random sampling** to preserve class balance across sets.
 * Created **upsampled and downsampled training sets** to address imbalance in readmission outcomes.
 
----
+
 
 ## Next Steps
 
@@ -65,19 +60,16 @@ This project focuses on **predicting whether diabetic patients are readmitted to
 * Perform hyperparameter tuning for best results.
 * Interpret feature importance to provide actionable insights for healthcare providers.
 
----
 
 ##  Repository Structure
 
-```
+
 ├── data/                 # Raw and processed datasets
 ├── figures/            # All the figures after data processing
 ├── Codes/              # Python/R scripts for reproducible workflows
 ├── Explorted Results/              # Outputs such as plots and metrics
 └── README.md             # Project overview
-```
 
----
 
 ## Importance
 
@@ -87,13 +79,12 @@ Early prediction of readmission for diabetic patients can:
 * Reduce hospital costs by preventing avoidable readmissions.
 * Assist healthcare providers in allocating resources efficiently.
 
----
+
 
 ## License
 
 This project is released under the [MIT License](LICENSE).
 
----
 
 ## Contributor
 
